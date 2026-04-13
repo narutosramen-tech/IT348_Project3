@@ -2,6 +2,8 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
 from sklearn.ensemble import StackingClassifier, VotingClassifier
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score, precision_score, recall_score
+from sklearn.pipeline import Pipeline
+from preprocessor import FraudPreprocessor
 import pandas as pd
 import numpy as np
 from typing import Dict, Tuple, Optional, Any
@@ -317,60 +319,40 @@ def train_and_evaluate_classifiers(
         }
     """
 
-    classifiers = {
-        "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-        "RandomForest": RandomForestClassifier(n_estimators=200, random_state=42),
-        "GradientBoosting": GradientBoostingClassifier(n_estimators=200, random_state=42)
+    pipelines = {
+        "LogReg": Pipeline([
+            ("preprocess", FraudPreprocessor()),
+            ("model", LogisticRegression(max_iter=1000))
+        ]),
+
+        "RandomForest": Pipeline([
+            ("preprocess", FraudPreprocessor()),
+            ("model", RandomForestClassifier(n_estimators=200, random_state=42))
+        ]),
+
+        "GradientBoosting": Pipeline([
+            ("preprocess", FraudPreprocessor()),
+            ("model", GradientBoostingClassifier(n_estimators=200, random_state=42))
+        ])
     }
 
-    results: Dict[str, Dict[str, Any]] = {}
-    evaluators: Dict[str, ClassifierEvaluator] = {}
+    results = {}
 
-    for name, clf in classifiers.items():
-        print(f"\n{'='*60}")
-        print(f"Training {name}...")
-        print(f"{'='*60}")
+    for name, pipe in pipelines.items():
+        pipe.fit(X_train, y_train)
+        y_pred = pipe.predict(X_test)
 
-        # Train
-        clf.fit(X_train, y_train)
-
-        # Predict
-        y_pred = clf.predict(X_test)
-
-        # Evaluate (ALWAYS use evaluator)
-        evaluator = ClassifierEvaluator(name, y_test.values, y_pred)
-        evaluation = evaluator.evaluate(
-            verbose=verbose,
-            include_confusion_matrix=True,
-            plot_confusion_matrix=False
-        )
-
-        metrics = evaluation["metrics"]
-        cm = evaluation.get("confusion_matrix")
-
-        evaluators[name] = evaluator
+        evaluator = ClassifierEvaluator(name, y_test, y_pred)
+        eval_result = evaluator.evaluate(verbose=True)
 
         results[name] = {
-            "model": clf,
-            "predictions": y_pred,
-            "metrics": metrics,
-            "evaluator": evaluator,
-            "confusion_matrix": cm
+            "model": pipe,
+            "metrics": eval_result["metrics"],
+            "evaluator": evaluator
         }
 
-    # 🔍 Pairwise comparison (optional but cleaner now)
-    if len(evaluators) >= 2:
-        print(f"\n{'='*60}")
-        print("CLASSIFIER COMPARISON (Recall > F1 > Precision > Accuracy)")
-        print(f"{'='*60}")
-
-        names = list(evaluators.keys())
-        for i in range(len(names) - 1):
-            eval_a = evaluators[names[i]]
-            eval_b = evaluators[names[i + 1]]
-            eval_a.compare_with_other(eval_b)
-
     return results
+
 def train_from_dataset(dataset: Dataset, sample_name: str):
     X_train, X_test, y_train, y_test = dataset.train_test_split(sample_name)
 
@@ -404,7 +386,7 @@ def quick_evaluate_classifier(classifier_name: str, y_true: np.ndarray, y_pred: 
 
 class SecurityFirstEnsemble:
     """
-    Security-first voting ensemble for malware detection.
+    Security-first voting ensemble for fraud detection.
     Uses 3 models with security-conservative tie-breaking.
     """
 
@@ -542,6 +524,22 @@ class SecurityFirstEnsemble:
             predictions = self._security_first_vote(X)
 
         return np.array(predictions)
+    
+    def predict_threshold(
+            self, 
+            X: pd.DataFrame, 
+            threshold: Optional[float] = None) -> np.ndarray:
+        """
+        Fraud decision layer based on probability threshold.
+        Only applies to models that support probabilities.
+        """
+        if threshold is None:
+            threshold = getattr(self, "threshold", 0.5)
+
+        proba = self.predict_proba(X)[:, 1]
+
+        return (proba >= threshold).astype(int)
+        
 
     def _security_first_vote(self, X: pd.DataFrame) -> np.ndarray:
         """
